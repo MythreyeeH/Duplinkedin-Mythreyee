@@ -288,8 +288,8 @@ app.get('/api/search/posts', protectRoute, (req, res) => {
         return res.status(200).json([]);
     }
 
-    // CRITICAL FIX: Clean single-line query
-    const query = "SELECT p.post_id, p.content, p.content_sent_at, u.name FROM posts p JOIN users u ON p.user_id = u.user_id WHERE p.content LIKE ? ORDER BY p.content_sent_at DESC LIMIT 20";
+    // CRITICAL FIX: Clean single-line query
+    const query = "SELECT p.post_id, p.content, p.content_sent_at, u.name FROM posts p JOIN users u ON p.user_id = u.user_id WHERE p.content LIKE ? ORDER BY p.content_sent_at DESC LIMIT 20";
     
     const searchParam = `%${searchQuery}%`;
 
@@ -314,7 +314,7 @@ app.get('/api/search/hashtags', protectRoute, (req, res) => {
     // Clean the search query (remove # if present)
     const cleanTag = searchQuery.trim().replace(/^#/, '');
 
-    // CRITICAL FIX: Clean single-line query
+    // CRITICAL FIX: Clean single-line query
     const query = "SELECT DISTINCT p.post_id, p.content, p.content_sent_at, u.name FROM posts p JOIN users u ON p.user_id = u.user_id JOIN hashtags h ON h.post_id = p.post_id WHERE h.hashtag = ? ORDER BY p.content_sent_at DESC LIMIT 20";
     
     dbConnection.query(query, [cleanTag], (err, results) => {
@@ -330,31 +330,37 @@ app.get('/api/search/hashtags', protectRoute, (req, res) => {
 // GET /api/users/:userId - Get User Profile (CRITICAL FIX APPLIED)
 app.get('/api/users/:userId', protectRoute, (req, res) => {
     const userId = req.params.userId;
-    const currentUserId = req.userId; // The person who is VIEWING
+    const profileUserId = parseInt(userId); // Convert URL parameter to integer once
+    const currentUserId = req.userId; // Guaranteed integer from JWT payload
 
     // CRITICAL FIX 1: Clean single-line query for user data
     const userQuery = "SELECT user_id, name, headline, summary, description FROM users WHERE user_id = ?";
     
-    dbConnection.query(userQuery, [userId], (err, userResults) => {
+    // Use the INTEGER version of the ID for the query
+    dbConnection.query(userQuery, [profileUserId], (err, userResults) => {
         if (err) {
             console.error('Database error fetching user profile:', err);
             return res.status(500).json({ error: 'Database error fetching user data.' });
         }
+        // Return 404 if no user is found
         if (userResults.length === 0) return res.status(404).json({ error: 'User not found.' });
 
         const userProfile = userResults[0];
 
-        // Case 1: User is viewing their own profile
-        if (parseInt(userId) === currentUserId) {
+        // 1. Check if viewing own profile (use integer comparison)
+        if (profileUserId === currentUserId) {
             userProfile.connectionStatus = 'self';
             return res.json(userProfile);
         }
         
-        // Case 2: User is viewing someone else's profile
+        // 2. Fetch Connection Status
         // CRITICAL FIX 2: Clean single-line query for connection status
         const connectionQuery = "SELECT status, connection1_id FROM connections WHERE (connection1_id = ? AND connection2_id = ?) OR (connection1_id = ? AND connection2_id = ?)";
         
-        dbConnection.query(connectionQuery, [currentUserId, userId, userId, currentUserId], (err, connectionResults) => {
+        // Ensure all parameters passed to the DB for connection IDs are integers
+        dbConnection.query(connectionQuery, 
+          [currentUserId, profileUserId, profileUserId, currentUserId], 
+          (err, connectionResults) => {
             if (err) {
                 console.error('Database error fetching connection status:', err);
                 return res.status(500).json({ error: 'Database error fetching connection status.' });
@@ -390,52 +396,46 @@ app.get('/api/users/:userId', protectRoute, (req, res) => {
 
 app.get('/api/users/:userId/connections', protectRoute, (req, res) => {
   const userId = req.params.userId;
-  const query = `
-    SELECT COUNT(*) as count 
-    FROM connections 
-    WHERE (connection1_id = ? OR connection2_id = ?) AND status = 'accepted'
-  `;
-  dbConnection.query(query, [userId, userId], (err, results) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(results[0]);
-  });
+    const profileIdInt = parseInt(userId); // Convert URL parameter to integer
+
+    // CRITICAL FIX: Clean single-line query
+    const query = "SELECT COUNT(*) as count FROM connections WHERE (connection1_id = ? OR connection2_id = ?) AND status = 'accepted'";
+    
+    dbConnection.query(query, [profileIdInt, profileIdInt], (err, results) => {
+        if (err) {
+            console.error('Database error fetching connection count:', err);
+            return res.status(500).json({ error: 'Database error fetching connection count.' });
+        }
+        res.json(results[0]); // Send back { count: X }
+    });
 });
 // ...
 // --- CONNECTION ENDPOINTS ---
 
 app.get('/api/connections', protectRoute, (req, res) => {
   const userId = req.userId;
-  const query = `
-    SELECT u.user_id, u.name, u.headline
-    FROM users u
-    JOIN connections c ON (u.user_id = c.connection2_id OR u.user_id = c.connection1_id)
-    WHERE (c.connection1_id = ? OR c.connection2_id = ?) AND c.status = 'accepted' AND u.user_id != ?
-  `;
+  // CRITICAL FIX: Clean single-line query
+  const query = "SELECT u.user_id, u.name, u.headline FROM users u JOIN connections c ON (u.user_id = c.connection2_id OR u.user_id = c.connection1_id) WHERE (c.connection1_id = ? OR c.connection2_id = ?) AND c.status = 'accepted' AND u.user_id != ?";
   
   dbConnection.query(query, [userId, userId, userId], (err, results) => {
-    if (err) return res.status(500).json({ error: err.message });
+    if (err) {
+        console.error('Database error fetching connections list:', err);
+        return res.status(500).json({ error: err.message });
+    }
     res.json(results);
   });
 });
 
 app.get('/api/connections/all', protectRoute, (req, res) => {
   const userId = req.userId;
-  const query = `
-    SELECT 
-      u.user_id, 
-      u.name, 
-      u.headline,
-      MAX(c.status) as status,
-      MAX(CASE WHEN c.connection1_id = ? THEN 'sent' ELSE 'received' END) as request_direction
-    FROM users u
-    LEFT JOIN connections c 
-      ON (c.connection1_id = u.user_id AND c.connection2_id = ?) OR (c.connection1_id = ? AND c.connection2_id = u.user_id)
-    WHERE u.user_id != ?
-    GROUP BY u.user_id, u.name, u.headline
-  `;
+  // CRITICAL FIX: Clean single-line query
+  const query = "SELECT u.user_id, u.name, u.headline, MAX(c.status) as status, MAX(CASE WHEN c.connection1_id = ? THEN 'sent' ELSE 'received' END) as request_direction FROM users u LEFT JOIN connections c ON (c.connection1_id = u.user_id AND c.connection2_id = ?) OR (c.connection1_id = ? AND c.connection2_id = u.user_id) WHERE u.user_id != ? GROUP BY u.user_id, u.name, u.headline";
   
   dbConnection.query(query, [userId, userId, userId, userId], (err, results) => {
-    if (err) return res.status(500).json({ error: err.message });
+    if (err) {
+        console.error('Database error fetching all connections status:', err);
+        return res.status(500).json({ error: err.message });
+    }
     
     const processedResults = results.map(user => {
       let connectionStatus = 'not_connected';
@@ -463,8 +463,8 @@ app.post('/api/connections/request', protectRoute, (req, res) => {
     return res.status(400).json({ error: 'Cannot connect with yourself.' });
   }
 
-  // This query assumes your 'status' column is VARCHAR/TEXT
-  const query = 'INSERT INTO connections (connection1_id, connection2_id, status, created_at) VALUES (?, ?, "pending", NOW())';
+  // FIX: Send INTEGER 0 for pending status
+  const query = 'INSERT INTO connections (connection1_id, connection2_id, status, created_at) VALUES (?, ?, 0, NOW())';
   
   dbConnection.query(query, [requesterId, receiverId], (err, results) => {
     if (err) {
@@ -482,7 +482,8 @@ app.post('/api/connections/accept', protectRoute, (req, res) => {
   const receiverId = req.userId; // You are the receiver
   const { requesterId } = req.body; // The person who sent it
   
-  const query = 'UPDATE connections SET status = "accepted" WHERE connection1_id = ? AND connection2_id = ? AND status = "pending"';
+  // FIX: Send INTEGER 1 for accepted status and check for INTEGER 0 (pending)
+  const query = 'UPDATE connections SET status = 1 WHERE connection1_id = ? AND connection2_id = ? AND status = 0';
   
   dbConnection.query(query, [requesterId, receiverId], (err, results) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -492,33 +493,15 @@ app.post('/api/connections/accept', protectRoute, (req, res) => {
     res.json({ message: 'Connection accepted.' });
   });
 });
-// ...
+
 // --- MESSAGING ENDPOINTS ARE UNCHANGED ---
 
+// GET /api/messages/conversations (FIXED for SQL Syntax Error)
 app.get('/api/messages/conversations', protectRoute, (req, res) => {
   const userId = req.userId;
-  const query = `
-    WITH UserConversations AS (
-      SELECT 
-        CASE
-          WHEN sender_id = ? THEN receiver_id
-          ELSE sender_id
-        END AS other_user_id
-      FROM messages
-      WHERE sender_id = ? OR receiver_id = ?
-      GROUP BY other_user_id
-    )
-    SELECT 
-      uc.other_user_id AS user_id, 
-      u.name, 
-      (SELECT content 
-        FROM messages 
-        WHERE (sender_id = ? AND receiver_id = uc.other_user_id) OR (sender_id = uc.other_user_id AND receiver_id = ?)
-        ORDER BY content_sent_at DESC
-        LIMIT 1) AS last_message
-    FROM UserConversations uc
-    JOIN users u ON uc.other_user_id = u.user_id
-  `;
+  
+  // CRITICAL FIX: The entire complex query is converted to a single, clean string.
+  const query = "WITH UserConversations AS (SELECT CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END AS other_user_id FROM messages WHERE sender_id = ? OR receiver_id = ? GROUP BY other_user_id) SELECT uc.other_user_id AS user_id, u.name, (SELECT content FROM messages WHERE (sender_id = ? AND receiver_id = uc.other_user_id) OR (sender_id = uc.other_user_id AND receiver_id = ?) ORDER BY content_sent_at DESC LIMIT 1) AS last_message FROM UserConversations uc JOIN users u ON uc.other_user_id = u.user_id";
 
   dbConnection.query(query, [userId, userId, userId, userId, userId], (err, results) => {
     if (err) {
@@ -529,25 +512,22 @@ app.get('/api/messages/conversations', protectRoute, (req, res) => {
   });
 });
 
+// GET /api/messages/:otherUserId (FIXED for stability)
 app.get('/api/messages/:otherUserId', protectRoute, (req, res) => {
   const userId = req.userId;
-  const otherUserId = parseInt(req.params.otherUserId);
+  const otherUserId = parseInt(req.params.otherUserId); // Use the integer version of the ID
 
   if (isNaN(otherUserId)) {
     return res.status(400).json({ error: 'Invalid user ID.' });
   }
 
-  const query = `
-    SELECT message_id, content, content_sent_at, sender_id, receiver_id
-    FROM messages
-    WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
-    ORDER BY content_sent_at ASC
-  `;
+  // CRITICAL FIX: Clean single-line query
+  const query = "SELECT message_id, content, content_sent_at, sender_id, receiver_id FROM messages WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?) ORDER BY content_sent_at ASC";
   
   dbConnection.query(query, [userId, otherUserId, otherUserId, userId], (err, results) => {
     if (err) {
       console.error('Error fetching messages:', err);
-      return res.status(500).json({ error: err.message });
+      return res.status(500).json({ error: 'Database error fetching messages.' }); // Changed error message for clarity
     }
     res.json(results);
   });
@@ -577,7 +557,7 @@ app.post('/api/messages', protectRoute, (req, res) => {
     });
   });
 });
-// ...
+
 // --- JOB ENDPOINTS ---
 
 // GET /api/jobs - Get all job listings (CRITICAL FIX APPLIED)
